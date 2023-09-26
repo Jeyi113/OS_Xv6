@@ -1,0 +1,189 @@
+diff --git a/Makefile b/Makefile
+index 04da7c6..19ff97a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -182,7 +182,7 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
+-	#_hostname\
++	_hostname\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+diff --git a/proc.c b/proc.c
+index 806b1b1..310a1f5 100644
+--- a/proc.c
++++ b/proc.c
+@@ -112,6 +112,8 @@ found:
+   memset(p->context, 0, sizeof *p->context);
+   p->context->eip = (uint)forkret;
+ 
++  p->pticks = ticks; // remeber the start ticks
++
+   return p;
+ }
+ 
+@@ -249,6 +251,8 @@ exit(void)
+ 
+   acquire(&ptable.lock);
+ 
++  cprintf("\n%s(%d) took %d ticks in wallclock\n", curproc->name, curproc->pid, ticks - curproc->pticks);
++
+   // Parent might be sleeping in wait().
+   wakeup1(curproc->parent);
+ 
+@@ -265,6 +269,7 @@ exit(void)
+   curproc->state = ZOMBIE;
+   sched();
+   panic("zombie exit");
++
+ }
+ 
+ // Wait for a child process to exit and return its pid.
+diff --git a/proc.h b/proc.h
+index 1647114..bc522b7 100644
+--- a/proc.h
++++ b/proc.h
+@@ -41,6 +41,7 @@ struct proc {
+   char *kstack;                // Bottom of kernel stack for this process
+   enum procstate state;        // Process state
+   int pid;                     // Process ID
++  uint pticks;                  // Process ticks
+   struct proc *parent;         // Parent process
+   struct trapframe *tf;        // Trap frame for current syscall
+   struct context *context;     // swtch() here to run process
+diff --git a/sh.c b/sh.c
+index f3c063c..f2168a2 100644
+--- a/sh.c
++++ b/sh.c
+@@ -177,6 +177,7 @@ getcmd(char *buf, int nbuf)
+ {
+   char hostname[64] = { 0, };
+   // TODO: Fill in hostname using gethostname()
++  gethostname(hostname);
+   printf(2, "root@%s:%s$ ", hostname, pwd);
+   memset(buf, 0, nbuf);
+   gets(buf, nbuf);
+@@ -208,9 +209,21 @@ main(void)
+         printf(2, "cannot cd %s\n", buf+3);
+       else {
+         static char tmp[1024] = { 0, };
++        static char* history[100];
++        int last_idx = 0;
+         // Append x from chdir(x) to pwd using strcat(), add "/" appropriately
+         // TODO
+-
++        if(buf[3] == '.' && buf[4] == '.' && last_idx != 0)
++        {
++          strcpy(history[last_idx - 1], pwd);
++        }
++        else
++        {
++          if(strlen(pwd) > 1)
++            strcat(pwd, "/");
++          history[++last_idx] = pwd;
++          strcat(pwd, buf+3);
++        }
+         // Collapse pwd path and save it to tmp
+         collapse_path(pwd, tmp);
+         // Copy tmp back to pwd
+diff --git a/syscall.c b/syscall.c
+index ee85261..6c94ae0 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,8 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_gethostname(void);
++extern int sys_sethostname(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +128,8 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_gethostname] sys_gethostname,
++[SYS_sethostname] sys_sethostname,
+ };
+ 
+ void
+diff --git a/syscall.h b/syscall.h
+index bc5f356..0810662 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_gethostname 22
++#define SYS_sethostname 23
+\ No newline at end of file
+diff --git a/sysproc.c b/sysproc.c
+index 0686d29..e21ebb2 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -7,6 +7,8 @@
+ #include "mmu.h"
+ #include "proc.h"
+ 
++char hostname[64] = "DataLab";
++
+ int
+ sys_fork(void)
+ {
+@@ -77,6 +79,29 @@ sys_sleep(void)
+   return 0;
+ }
+ 
++// Get / Set hostname
++int
++sys_gethostname(void)
++{
++  char *buf;
++  if(argstr(0, &buf) < 0)
++    return -1;
++  
++  safestrcpy(buf, hostname, 64);
++  return 0;
++}
++
++int
++sys_sethostname(void)
++{
++  char *h_name;
++  if(argstr(0, &h_name) < 0)
++    return -1;
++  
++  safestrcpy(hostname, h_name, 64);
++  return 0;
++}
++
+ // return how many clock tick interrupts have occurred
+ // since start.
+ int
+diff --git a/user.h b/user.h
+index f341021..9518832 100644
+--- a/user.h
++++ b/user.h
+@@ -23,6 +23,8 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int gethostname(char*);
++int sethostname(const char*);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/usys.S b/usys.S
+index 8bfd8a1..0088100 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,3 +29,5 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(gethostname)
++SYSCALL(sethostname)
